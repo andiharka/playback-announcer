@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { listen } from "@tauri-apps/api/event";
+  import { emit, listen, type UnlistenFn } from "@tauri-apps/api/event";
   import { invoke } from "@tauri-apps/api/core";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import {
@@ -30,42 +30,58 @@
   const tr = $derived(t());
   const isDirty = $derived(configStore.isDirty);
   const schedulerStatus = $derived(playbackStore.schedulerStatus);
+  let removePlaybackListeners = () => {};
 
   onMount(() => {
-    let unlisten: (() => void) | null = null;
+    let destroyed = false;
+    const unlisteners: UnlistenFn[] = [];
+    const playbackUnlisteners: UnlistenFn[] = [];
+
+    async function register(promise: Promise<UnlistenFn>, keepDuringPlayback = false) {
+      const unlisten = await promise;
+      if (destroyed && !(keepDuringPlayback && isPlayingSchedule)) unlisten();
+      else (keepDuringPlayback ? playbackUnlisteners : unlisteners).push(unlisten);
+    }
+
+    removePlaybackListeners = () => {
+      playbackUnlisteners.splice(0).forEach((unlisten) => unlisten());
+    };
 
     (async () => {
       await loadConfig();
+      if (destroyed) return;
 
       const appWindow = getCurrentWindow();
-      unlisten = await appWindow.listen("tauri://close-requested", async () => {
-        if (configStore.isDirty) {
-          showConfirm(
-            tr.unsaved.title,
-            tr.unsaved.message,
-            async () => {
-              await saveConfig();
-              await appWindow.hide();
-            },
-            async () => {
-              revertConfig();
-              await appWindow.hide();
-            },
-          );
-        } else {
-          await appWindow.hide();
-        }
-      });
+      await register(
+        appWindow.listen("tauri://close-requested", async () => {
+          if (configStore.isDirty) {
+            showConfirm(
+              tr.unsaved.title,
+              tr.unsaved.message,
+              async () => {
+                await saveConfig();
+                await appWindow.hide();
+              },
+              async () => {
+                revertConfig();
+                await appWindow.hide();
+              },
+            );
+          } else {
+            await appWindow.hide();
+          }
+        }),
+      );
 
-      await listen<{ status: string }>("tray:status-changed", ({ payload }) => {
+      await register(listen<{ status: string }>("tray:status-changed", ({ payload }) => {
         setSchedulerStatus(payload.status as "active" | "paused");
-      });
+      }));
 
-      await listen<{ scheduleId: string }>("scheduler:play", ({ payload }) => {
+      await register(listen<{ scheduleId: string }>("scheduler:play", ({ payload }) => {
         startScheduledPlayback(payload.scheduleId);
-      });
+      }));
 
-      await listen<{ scheduleId: string; minutesBefore: number }>(
+      await register(listen<{ scheduleId: string; minutesBefore: number }>(
         "scheduler:notify",
         ({ payload }) => {
           const schedule = configStore.schedules.find(
@@ -81,17 +97,32 @@
             },
           );
         },
-      );
+      ));
 
-      await listen("playback:ended", () => advancePlaybackQueue());
-      await listen("playback:pause", () =>
+      await register(listen<PlaybackResult>("playback:ended", ({ payload }) =>
+        advancePlaybackQueue(payload),
+      ), true);
+      await register(listen<{ sessionId: string }>("playback:session-started", ({ payload }) => {
+        if (!currentSessionId || payload.sessionId === currentSessionId) return;
+        currentSessionId = null;
+        currentSequence++;
+        isPlayingSchedule = false;
+        advancing = false;
+        playQueue = [];
+        queueIndex = 0;
+        scheduleLoopRemaining = 0;
+        if (destroyed) removePlaybackListeners();
+      }), true);
+      await register(listen("playback:pause", () =>
         setPlaybackState({ status: "paused" }),
-      );
-      await listen("playback:resume", () =>
+      ));
+      await register(listen("playback:resume", () =>
         setPlaybackState({ status: "playing" }),
-      );
+      ));
       // playback:stop is only emitted by MiniPlayer's stop button (manual stop)
-      await listen("playback:stop", () => {
+      await register(listen("playback:stop", () => {
+        currentSessionId = null;
+        currentSequence++;
         setPlaybackState({ status: "idle", scheduleId: null, mediaPath: null });
         isPlayingSchedule = false;
         advancing = false;
@@ -99,13 +130,31 @@
         queueIndex = 0;
         scheduleLoopRemaining = 0;
         invoke("close_mini_player").catch(() => {});
-      });
-    })();
+        if (destroyed) removePlaybackListeners();
+      }), true);
+    })().catch((error) => {
+      console.error("[Schedules] Failed to register event listeners:", error);
+    });
 
     return () => {
-      unlisten?.();
+      destroyed = true;
+      unlisteners.forEach((unlisten) => unlisten());
+      if (!isPlayingSchedule) {
+        currentSessionId = null;
+        removePlaybackListeners();
+      }
     };
   });
+
+  type PlaybackResult = {
+    sessionId: string;
+    sequence: number;
+    error?: string;
+  };
+
+  type MiniPlayerReady = {
+    requestId: string;
+  };
 
   let playQueue: {
     path: string;
@@ -118,13 +167,63 @@
   let scheduleLoopRemaining = 0;
   let isPlayingSchedule = false; // true while a schedule playlist is active
   let advancing = false; // guard against re-entrant advancePlaybackQueue
+  let currentSessionId: string | null = null;
+  let currentSequence = 0;
   let newScheduleId = $state<string | null>(null);
+
+  async function waitForMiniPlayer(sessionId: string): Promise<boolean> {
+    const requestId = crypto.randomUUID();
+    let unlisten: UnlistenFn | null = null;
+    let requestTimer: ReturnType<typeof setInterval> | null = null;
+    let timeout: ReturnType<typeof setTimeout> | null = null;
+    let settled = false;
+
+    return new Promise<boolean>(async (resolve, reject) => {
+      const finish = (ready: boolean) => {
+        if (settled) return;
+        settled = true;
+        if (requestTimer) clearInterval(requestTimer);
+        if (timeout) clearTimeout(timeout);
+        unlisten?.();
+        resolve(ready);
+      };
+
+      try {
+        unlisten = await listen<MiniPlayerReady>("mini-player:ready", ({ payload }) => {
+          if (payload.requestId === requestId) finish(true);
+        });
+
+        if (currentSessionId !== sessionId) {
+          finish(false);
+          return;
+        }
+
+        const requestReady = () => {
+          emit("mini-player:ready-request", { requestId }).catch(() => {});
+        };
+        requestReady();
+        requestTimer = setInterval(requestReady, 100);
+        timeout = setTimeout(() => finish(false), 3000);
+      } catch (error) {
+        if (requestTimer) clearInterval(requestTimer);
+        if (timeout) clearTimeout(timeout);
+        reject(error);
+      }
+    });
+  }
 
   async function startScheduledPlayback(scheduleId: string) {
     const schedule = configStore.schedules.find((s) => s.id === scheduleId);
     if (!schedule || schedule.media.length === 0) return;
 
+    const sessionId = crypto.randomUUID();
+    currentSessionId = sessionId;
+    currentSequence = 0;
+    await emit("playback:session-started", { sessionId });
+    if (currentSessionId !== sessionId) return;
+
     const { getMediaType } = await import("$lib/utils/thumbnail.js");
+    if (currentSessionId !== sessionId) return;
     playQueue = schedule.media.map((m) => ({
       path: m.path,
       volume: m.volume,
@@ -147,44 +246,27 @@
     });
     await invoke("open_mini_player").catch(() => {});
 
-    // Wait for the mini-player to signal it has mounted all its event listeners
-    // before emitting playback:start. This fixes a Windows race condition where
-    // WebView2 initialization (500ms–1500ms) causes the event to be dropped.
-    //
-    // Edge case: if the mini-player window was already open/mounted from a previous
-    // play session, it won't re-emit "mini-player:ready", so the fallback timeout
-    // (500ms) ensures playback still starts in that scenario.
-    const { listen: listenOnce } = await import("@tauri-apps/api/event");
-    await new Promise<void>((resolve) => {
-      let settled = false;
-      const fallback = setTimeout(() => {
-        if (!settled) {
-          settled = true;
-          console.log("[Schedules] mini-player:ready fallback timeout fired");
-          resolve();
-        }
-      }, 500);
-
-      listenOnce("mini-player:ready", () => {
-        if (!settled) {
-          settled = true;
-          clearTimeout(fallback);
-          console.log("[Schedules] mini-player:ready signal received");
-          resolve();
-        }
-      }).then((unlisten) => {
-        // Auto-unlisten after we've resolved (either path)
-        Promise.resolve().then(unlisten);
-      });
-    });
+    const ready = await waitForMiniPlayer(sessionId);
+    if (!ready || currentSessionId !== sessionId) {
+      console.error("[Schedules] Mini-player did not become ready in time");
+      if (currentSessionId === sessionId) {
+        currentSessionId = null;
+        isPlayingSchedule = false;
+        playQueue = [];
+        setPlaybackState({ status: "idle", scheduleId: null, mediaPath: null });
+        invoke("close_mini_player").catch(() => {});
+      }
+      return;
+    }
 
     playQueueItem(0);
   }
 
   async function playQueueItem(index: number) {
-    const { emit } = await import("@tauri-apps/api/event");
     const item = playQueue[index];
-    if (!item) return;
+    const sessionId = currentSessionId;
+    if (!item || !sessionId) return;
+    const sequence = ++currentSequence;
     
     // Don't call open_mini_player here — it's already opened once in
     // startScheduledPlayback(). Re-calling show()/hide() between tracks
@@ -203,6 +285,8 @@
       loopCount: q.loopCount,
     }));
     await emit("playback:start", {
+      sessionId,
+      sequence,
       path: item.path,
       type: item.type,
       volume: item.volume,
@@ -211,11 +295,16 @@
     });
   }
 
-  async function advancePlaybackQueue() {
+  async function advancePlaybackQueue(result: PlaybackResult) {
     // Guard: ignore stale or duplicate 'ended' events
     if (!isPlayingSchedule || playQueue.length === 0) return;
+    if (result.sessionId !== currentSessionId || result.sequence !== currentSequence) return;
     if (advancing) return;
     advancing = true;
+
+    if (result.error) {
+      console.error("[Schedules] Media playback failed:", result.error);
+    }
 
     try {
       loopRemaining--;
@@ -242,16 +331,23 @@
           await playQueueItem(0);
         } else {
           // All done — clean up and hide mini-player
+          const finishedSessionId = currentSessionId;
           isPlayingSchedule = false;
           playQueue = [];
           queueIndex = 0;
           scheduleLoopRemaining = 0;
           setPlaybackState({ status: "idle", scheduleId: null, mediaPath: null });
-          invoke("close_mini_player").catch(() => {});
+          // Keep the WebView alive briefly so the OS audio buffer can drain.
+          await new Promise((resolve) => setTimeout(resolve, 400));
+          if (currentSessionId === finishedSessionId && !isPlayingSchedule) {
+            currentSessionId = null;
+            invoke("close_mini_player").catch(() => {});
+            removePlaybackListeners();
+          }
         }
       }
     } finally {
-      advancing = false;
+      if (result.sessionId === currentSessionId) advancing = false;
     }
   }
 

@@ -1,6 +1,6 @@
 [package]
 name = "SIPUTAR"
-version = "0.6.2"
+version = "0.6.3"
 description = "A multimedia scheduling and announcement application with ElevenLabs TTS integration"
 authors = ["Andi Mahardika"]
 edition = "2021"

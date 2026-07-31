@@ -1,7 +1,7 @@
+use chrono::{Datelike, Duration as ChronoDuration, Local, NaiveTime, Timelike};
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter};
 use tokio::time::{sleep, Duration};
-use chrono::{Local, Datelike, Timelike};
 
 use crate::activity_log;
 use crate::types::{Schedule, SchedulerStatus};
@@ -25,11 +25,16 @@ impl SchedulerState {
 pub fn start_scheduler(app: AppHandle, state: Arc<Mutex<SchedulerState>>) {
     tauri::async_runtime::spawn(async move {
         let mut last_minute = u32::MAX;
+        let mut last_check = Local::now();
 
         loop {
             sleep(Duration::from_secs(1)).await;
 
             let now = Local::now();
+            // Tokio timers may wake late. Check a bounded elapsed interval instead of
+            // requiring the loop to run during one exact wall-clock second.
+            let check_from = std::cmp::max(last_check, now - ChronoDuration::seconds(10));
+            last_check = now;
             let current_minute = now.minute();
 
             // Reset notification tracker at the start of each new minute
@@ -67,19 +72,32 @@ pub fn start_scheduler(app: AppHandle, state: Arc<Mutex<SchedulerState>>) {
 
                 // Check notifications
                 for notif in &schedule.notifications {
-                    let notif_key = format!("{}-{}-notif{}", now.format("%Y-%m-%d"), schedule.id, notif.offset_minutes);
-                    let already_notified = state.lock().map(|s| s.notified.contains(&notif_key)).unwrap_or(true);
+                    let notif_key = format!(
+                        "{}-{}-notif{}",
+                        now.format("%Y-%m-%d"),
+                        schedule.id,
+                        notif.offset_minutes
+                    );
+                    let already_notified = state
+                        .lock()
+                        .map(|s| s.notified.contains(&notif_key))
+                        .unwrap_or(true);
                     if already_notified {
                         continue;
                     }
 
                     // Calculate notification time
-                    if let Some(notif_time) = calc_offset_time(&schedule.time, -notif.offset_minutes) {
+                    if let Some(notif_time) =
+                        calc_offset_time(&schedule.time, -notif.offset_minutes)
+                    {
                         if now_time.starts_with(&notif_time) {
-                            let _ = app.emit("scheduler:notify", serde_json::json!({
-                                "scheduleId": schedule.id,
-                                "minutesBefore": notif.offset_minutes,
-                            }));
+                            let _ = app.emit(
+                                "scheduler:notify",
+                                serde_json::json!({
+                                    "scheduleId": schedule.id,
+                                    "minutesBefore": notif.offset_minutes,
+                                }),
+                            );
                             if let Ok(mut s) = state.lock() {
                                 s.notified.insert(notif_key);
                             }
@@ -89,16 +107,33 @@ pub fn start_scheduler(app: AppHandle, state: Arc<Mutex<SchedulerState>>) {
 
                 // Check playback trigger (match HH:MM:SS)
                 let play_key = format!("{}-{}-play", now.format("%Y-%m-%d"), schedule.id);
-                let already_triggered = state.lock().map(|s| s.notified.contains(&play_key)).unwrap_or(true);
+                let already_triggered = state
+                    .lock()
+                    .map(|s| s.notified.contains(&play_key))
+                    .unwrap_or(true);
                 if already_triggered {
                     continue;
                 }
 
-                if now_time.starts_with(&schedule.time) {
+                let should_play = NaiveTime::parse_from_str(&schedule.time, "%H:%M:%S")
+                    .ok()
+                    .and_then(|time| {
+                        now.date_naive()
+                            .and_time(time)
+                            .and_local_timezone(Local)
+                            .single()
+                    })
+                    .map(|target| target > check_from && target <= now)
+                    .unwrap_or(false);
+
+                if should_play {
                     activity_log::log_playback_running(Some(&schedule.id));
-                    let _ = app.emit("scheduler:play", serde_json::json!({
-                        "scheduleId": schedule.id,
-                    }));
+                    let _ = app.emit(
+                        "scheduler:play",
+                        serde_json::json!({
+                            "scheduleId": schedule.id,
+                        }),
+                    );
                     if let Ok(mut s) = state.lock() {
                         s.notified.insert(play_key);
                     }
@@ -111,7 +146,9 @@ pub fn start_scheduler(app: AppHandle, state: Arc<Mutex<SchedulerState>>) {
 /// Subtract `offset_minutes` from a "HH:MM:SS" time string, return "HH:MM"
 fn calc_offset_time(time_str: &str, offset_minutes: i64) -> Option<String> {
     let parts: Vec<&str> = time_str.split(':').collect();
-    if parts.len() < 2 { return None; }
+    if parts.len() < 2 {
+        return None;
+    }
     let h: i64 = parts[0].parse().ok()?;
     let m: i64 = parts[1].parse().ok()?;
     let total = h * 60 + m + offset_minutes;

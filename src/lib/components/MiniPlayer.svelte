@@ -36,6 +36,10 @@
   let playlistEl = $state<HTMLElement | null>(null);
 
   let unlisteners: UnlistenFn[] = [];
+  let activeSessionId: string | null = null;
+  let activeSequence = 0;
+  let activeAssetUrl: string | null = null;
+  let completedKey: string | null = null;
 
   const pb = $derived(playbackStore.state);
   const fileName = $derived(pb.mediaPath ? getFileName(pb.mediaPath) : "");
@@ -65,6 +69,36 @@
       ?.scrollIntoView({ block: "nearest", behavior: "smooth" });
   }
 
+  function isCurrent(sessionId: string, sequence: number): boolean {
+    return activeSessionId === sessionId && activeSequence === sequence;
+  }
+
+  function waitUntilPlayable(
+    el: HTMLMediaElement,
+    sessionId: string,
+    sequence: number,
+  ): Promise<void> {
+    if (el.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA) return Promise.resolve();
+
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => finish(new Error("Timed out loading media")), 10000);
+      const onCanPlay = () => finish();
+      const onError = () => finish(new Error(el.error?.message || "Failed to load media"));
+
+      function finish(error?: Error) {
+        clearTimeout(timeout);
+        el.removeEventListener("canplay", onCanPlay);
+        el.removeEventListener("error", onError);
+        if (!isCurrent(sessionId, sequence)) resolve();
+        else if (error) reject(error);
+        else resolve();
+      }
+
+      el.addEventListener("canplay", onCanPlay, { once: true });
+      el.addEventListener("error", onError, { once: true });
+    });
+  }
+
   onMount(async () => {
     console.log("[MiniPlayer] Component mounted");
 
@@ -87,6 +121,8 @@
 
     unlisteners.push(
       await listen<{
+        sessionId: string;
+        sequence: number;
         path: string;
         type: "video" | "audio";
         volume: number;
@@ -94,6 +130,9 @@
         currentIndex?: number;
       }>("playback:start", async ({ payload }) => {
         console.log("[MiniPlayer] playback:start event received:", payload);
+        activeSessionId = payload.sessionId;
+        activeSequence = payload.sequence;
+        completedKey = null;
         activeType = payload.type;
         if (payload.playlist) {
           playlist = payload.playlist;
@@ -109,21 +148,34 @@
 
         // Wait for DOM to update so videoEl is bound before playing
         await tick();
+        if (!isCurrent(payload.sessionId, payload.sequence)) return;
 
         const el = payload.type === "video" ? videoEl : audioEl;
         if (el) {
+          videoEl?.pause();
+          audioEl?.pause();
           const assetUrl = payload.path.startsWith("/media/")
             ? payload.path
             : convertFileSrc(payload.path);
           console.log("[MiniPlayer] Loading media:", payload.path);
           console.log("[MiniPlayer] Converted URL:", assetUrl);
           el.src = assetUrl;
+          activeAssetUrl = el.src;
           el.volume = payload.volume;
-          el.play().catch((err) => {
+          el.load();
+
+          try {
+            await waitUntilPlayable(el, payload.sessionId, payload.sequence);
+            if (!isCurrent(payload.sessionId, payload.sequence)) return;
+            await el.play();
+          } catch (err) {
             console.error("[MiniPlayer] Failed to play media:", err);
-            // If play fails (e.g. 404 or unsupported), emit ended to skip
-            handleEnded();
-          });
+            finishPlayback(
+              payload.sessionId,
+              payload.sequence,
+              err instanceof Error ? err.message : String(err),
+            );
+          }
         } else {
           console.error(
             "[MiniPlayer] Media element not found for type:",
@@ -150,6 +202,10 @@
         console.log("[MiniPlayer] playback:stop event received");
         setPlaybackState({ status: "idle", mediaPath: null, mediaType: null });
         activeType = null;
+        activeSessionId = null;
+        activeSequence++;
+        activeAssetUrl = null;
+        completedKey = null;
         playlist = [];
         currentIndex = 0;
         durations = {};
@@ -163,26 +219,29 @@
           audioEl.removeAttribute("src");
         }
       }),
+      await listen<{ requestId: string }>("mini-player:ready-request", ({ payload }) => {
+        emit("mini-player:ready", { requestId: payload.requestId });
+      }),
     );
-
-    // Signal that all event listeners are registered and ready to receive playback events.
-    // This is consumed by the schedules page to avoid the Windows race condition where
-    // playback:start is emitted before this window has finished mounting.
-    await emit("mini-player:ready", {});
-    console.log("[MiniPlayer] Ready signal emitted");
+    console.log("[MiniPlayer] Ready for playback requests");
   });
 
   onDestroy(() => {
     unlisteners.forEach((u) => u());
   });
 
-  let _ending = false;
-  function handleEnded() {
-    if (_ending) return;
-    _ending = true;
-    console.log("[MiniPlayer] Media ended");
-    emit("playback:ended", {});
-    setTimeout(() => { _ending = false; }, 500);
+  function finishPlayback(sessionId: string, sequence: number, error?: string) {
+    if (!isCurrent(sessionId, sequence)) return;
+    const key = `${sessionId}:${sequence}`;
+    if (completedKey === key) return;
+    completedKey = key;
+    console.log(error ? "[MiniPlayer] Media failed" : "[MiniPlayer] Media ended");
+    emit("playback:ended", { sessionId, sequence, error });
+  }
+
+  function handleEnded(e: Event) {
+    if (e.target !== activeEl()) return;
+    finishPlayback(activeSessionId ?? "", activeSequence);
   }
   async function handlePause() {
     console.log("[MiniPlayer] Pause button clicked");
@@ -205,8 +264,13 @@
       networkState: target.networkState,
       readyState: target.readyState,
     });
+    if (target !== activeEl() || (activeAssetUrl && target.src !== activeAssetUrl)) return;
     // Skip to next item if media fails to load
-    handleEnded();
+    finishPlayback(
+      activeSessionId ?? "",
+      activeSequence,
+      target.error?.message || `Media error ${target.error?.code ?? "unknown"}`,
+    );
   }
 
   function handleMediaLoaded(e: Event) {
@@ -227,6 +291,7 @@
     <div class="media-area" data-tauri-drag-region>
       <video
         bind:this={videoEl}
+        preload="auto"
         onended={handleEnded}
         onerror={handleMediaError}
         onloadeddata={handleMediaLoaded}
@@ -240,6 +305,7 @@
     <div class="media-area audio-placeholder" data-tauri-drag-region>
       <audio
         bind:this={audioEl}
+        preload="auto"
         onended={handleEnded}
         onerror={handleMediaError}
         onloadeddata={handleMediaLoaded}
