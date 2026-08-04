@@ -181,6 +181,11 @@
             "[MiniPlayer] Media element not found for type:",
             payload.type,
           );
+          finishPlayback(
+            payload.sessionId,
+            payload.sequence,
+            `Media element not found for type: ${payload.type}`,
+          );
         }
         scrollToActive();
       }),
@@ -286,35 +291,33 @@
 </script>
 
 <div class="player" data-tauri-drag-region>
-  <!-- Media area: video is behind a transparent drag overlay -->
-  {#if pb.mediaType === "video"}
-    <div class="media-area" data-tauri-drag-region>
-      <video
-        bind:this={videoEl}
-        preload="auto"
-        onended={handleEnded}
-        onerror={handleMediaError}
-        onloadeddata={handleMediaLoaded}
-        style="width:100%;height:100%;object-fit:contain;pointer-events:none;"
-      ></video>
-      <!-- Transparent overlay so drag-region captures events above video -->
-      <div class="video-drag-overlay" data-tauri-drag-region></div>
-    </div>
-  {:else}
-    <!-- Audio: just a dark placeholder -->
-    <div class="media-area audio-placeholder" data-tauri-drag-region>
-      <audio
-        bind:this={audioEl}
-        preload="auto"
-        onended={handleEnded}
-        onerror={handleMediaError}
-        onloadeddata={handleMediaLoaded}
-      ></audio>
-      <!-- keep video bound but hidden -->
-      <video bind:this={videoEl} style="display:none;"></video>
+  <!-- Keep both elements mounted; WebView2 can lose bindings while swapping nodes. -->
+  <div
+    class="media-area"
+    class:audio-placeholder={pb.mediaType !== "video"}
+    data-tauri-drag-region
+  >
+    <video
+      bind:this={videoEl}
+      class:hidden={pb.mediaType !== "video"}
+      preload="auto"
+      onended={handleEnded}
+      onerror={handleMediaError}
+      onloadeddata={handleMediaLoaded}
+      style="width:100%;height:100%;object-fit:contain;pointer-events:none;"
+    ></video>
+    <audio
+      bind:this={audioEl}
+      preload="auto"
+      onended={handleEnded}
+      onerror={handleMediaError}
+      onloadeddata={handleMediaLoaded}
+    ></audio>
+    <div class="video-drag-overlay" data-tauri-drag-region></div>
+    {#if pb.mediaType !== "video"}
       <div class="audio-icon"><IconMusic size={32} color="yellowgreen" /></div>
-    </div>
-  {/if}
+    {/if}
+  </div>
 
   <!-- Controls bar -->
   <div class="controls" data-tauri-drag-region>
@@ -403,6 +406,9 @@
     position: absolute;
     inset: 0;
     z-index: 1;
+  }
+  video.hidden {
+    display: none;
   }
   .audio-placeholder {
     display: flex;

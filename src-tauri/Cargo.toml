@@ -1,6 +1,6 @@
 [package]
 name = "SIPUTAR"
-version = "0.6.3"
+version = "0.6.4"
 description = "A multimedia scheduling and announcement application with ElevenLabs TTS integration"
 authors = ["Andi Mahardika"]
 edition = "2021"
@@ -51,4 +51,3 @@ keyring = { version = "3", features = ["sync-secret-service"] }
 [target.'cfg(target_os = "windows")'.dependencies]
 keyring = { version = "3", features = ["windows-native"] }
 winapi = { version = "0.3", features = ["winreg", "winnt", "winerror"] }
-

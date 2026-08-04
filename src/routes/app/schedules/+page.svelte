@@ -31,8 +31,10 @@
   const isDirty = $derived(configStore.isDirty);
   const schedulerStatus = $derived(playbackStore.schedulerStatus);
   let removePlaybackListeners = () => {};
+  let schedulesPageDestroyed = false;
 
   onMount(() => {
+    schedulesPageDestroyed = false;
     let destroyed = false;
     const unlisteners: UnlistenFn[] = [];
     const playbackUnlisteners: UnlistenFn[] = [];
@@ -138,6 +140,7 @@
 
     return () => {
       destroyed = true;
+      schedulesPageDestroyed = true;
       unlisteners.forEach((unlisten) => unlisten());
       if (!isPlayingSchedule) {
         currentSessionId = null;
@@ -342,7 +345,7 @@
           if (currentSessionId === finishedSessionId && !isPlayingSchedule) {
             currentSessionId = null;
             invoke("close_mini_player").catch(() => {});
-            removePlaybackListeners();
+            if (schedulesPageDestroyed) removePlaybackListeners();
           }
         }
       }
