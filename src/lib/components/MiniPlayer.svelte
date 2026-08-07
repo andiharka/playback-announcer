@@ -496,9 +496,6 @@
               <span class="item-loop">{loopLabel(item.loopCount)}</span>
             {/if}
           </span>
-          {#if i === currentIndex}
-            <span class="now-dot"></span>
-          {/if}
         </div>
       {/each}
     </div>
@@ -780,23 +777,5 @@
     font-size: 12px;
     color: #4ade80;
     opacity: 0.8;
-  }
-  .now-dot {
-    width: 5px;
-    height: 5px;
-    border-radius: 50%;
-    background: #4ade80;
-    flex-shrink: 0;
-    animation: pulse 1.4s ease-in-out infinite;
-  }
-
-  @keyframes pulse {
-    0%,
-    100% {
-      opacity: 1;
-    }
-    50% {
-      opacity: 0.3;
-    }
   }
 </style>
