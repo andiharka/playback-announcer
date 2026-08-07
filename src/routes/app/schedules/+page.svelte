@@ -121,18 +121,49 @@
       await register(listen("playback:resume", () =>
         setPlaybackState({ status: "playing" }),
       ));
-      // playback:stop is only emitted by MiniPlayer's stop button (manual stop)
+      // playback:stop is emitted by MiniPlayer's stop button (manual stop),
+      // and internally by the reset flow after state is already cleared.
       await register(listen("playback:stop", () => {
+        if (scheduleIdForReset !== null || isPlayingSchedule || playQueue.length) {
+          currentSessionId = null;
+          currentSequence++;
+          setPlaybackState({ status: "idle", scheduleId: null, mediaPath: null });
+          isPlayingSchedule = false;
+          advancing = false;
+          playQueue = [];
+          queueIndex = 0;
+          scheduleLoopRemaining = 0;
+          scheduleLoopCountInit = 0;
+          invoke("close_mini_player").catch(() => {});
+          scheduleIdForReset = null;
+          if (destroyed) removePlaybackListeners();
+        }
+      }), true);
+      // Loop tracking for schedule-level repeat display
+      // (scheduleLoopRemaining lives at module scope; used by advancePlaybackQueue)
+
+      await register(listen("playback:reset", () => {
+        console.log("[Schedules] playback:reset received");
+        if (!scheduleIdForReset || !isPlayingSchedule) return;
+        const restartId = scheduleIdForReset;
+        // Full synchronous cleanup of internal state first
         currentSessionId = null;
         currentSequence++;
-        setPlaybackState({ status: "idle", scheduleId: null, mediaPath: null });
-        isPlayingSchedule = false;
         advancing = false;
+        isPlayingSchedule = false;
         playQueue = [];
         queueIndex = 0;
         scheduleLoopRemaining = 0;
-        invoke("close_mini_player").catch(() => {});
-        if (destroyed) removePlaybackListeners();
+        scheduleLoopCountInit = 0;
+        scheduleIdForReset = null;
+        // Tell MiniPlayer to stop its media — it will handle cleanup internally
+        // (pausing, clearing src, etc.). Our stop listener above no-ops because
+        // the state was already cleared by this reset handler.
+        emit("playback:stop", {}).catch(() => {});
+        // Wait for MiniPlayer to finish cleanup + close, drain audio buffer, then reopen
+        setTimeout(async () => {
+          startScheduledPlayback(restartId);
+        }, 500);
       }), true);
     })().catch((error) => {
       console.error("[Schedules] Failed to register event listeners:", error);
@@ -168,10 +199,12 @@
   let queueIndex = 0;
   let loopRemaining = 0;
   let scheduleLoopRemaining = 0;
+  let scheduleLoopCountInit = 0; // original schedule loop count (0 = infinite)
   let isPlayingSchedule = false; // true while a schedule playlist is active
   let advancing = false; // guard against re-entrant advancePlaybackQueue
   let currentSessionId: string | null = null;
   let currentSequence = 0;
+  let scheduleIdForReset: string | null = null;
   let newScheduleId = $state<string | null>(null);
 
   async function waitForMiniPlayer(sessionId: string): Promise<boolean> {
@@ -238,8 +271,10 @@
     // Schedule-level loop: 0 = infinite (-1 sentinel), otherwise the total number of passes
     const lc = schedule.loopCount ?? 1;
     scheduleLoopRemaining = lc === 0 ? -1 : Math.max(1, lc);
+    scheduleLoopCountInit = lc === 0 ? 0 : Math.max(1, lc);
     isPlayingSchedule = true;
     advancing = false;
+    scheduleIdForReset = scheduleId;
 
     setPlaybackState({
       status: "playing",
@@ -287,6 +322,11 @@
       path: q.path,
       loopCount: q.loopCount,
     }));
+    // Calculate current/total schedule-level loops for the MiniPlayer display
+    const totalLoopsDisplay = scheduleLoopCountInit;  // 0 = infinite
+    const currentLoopNum = totalLoopsDisplay > 0
+      ? (totalLoopsDisplay - scheduleLoopRemaining + 1)
+      : 1;
     await emit("playback:start", {
       sessionId,
       sequence,
@@ -295,6 +335,8 @@
       volume: item.volume,
       playlist,
       currentIndex: index,
+      currentLoop: currentLoopNum,
+      totalLoops: totalLoopsDisplay,
     });
   }
 

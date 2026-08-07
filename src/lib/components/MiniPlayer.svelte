@@ -9,6 +9,7 @@
   } from "$lib/stores/playback.svelte.js";
   import { getFileName, getMediaDuration } from "$lib/utils/thumbnail.js";
   import { formatDuration } from "$lib/utils/duration.js";
+  import { t } from "$lib/i18n/index.svelte.js";
   import type { UnlistenFn } from "@tauri-apps/api/event";
   import {
     IconPlayerPause,
@@ -16,6 +17,7 @@
     IconPlayerStop,
     IconMusic,
     IconVideo,
+    IconRefresh,
   } from "@tabler/icons-svelte";
 
   console.log("[MiniPlayer] Component initializing...");
@@ -41,8 +43,17 @@
   let activeAssetUrl: string | null = null;
   let completedKey: string | null = null;
 
+  // Progress bar state
+  let currentTime = $state(0);
+  let duration = $state(0);
+
+  // Loop info from scheduler
+  let loopCurrent = $state(0);
+  let loopTotal = $state(0);
+
   const pb = $derived(playbackStore.state);
   const fileName = $derived(pb.mediaPath ? getFileName(pb.mediaPath) : "");
+  const tr = $derived(t());
 
   function activeEl(): HTMLVideoElement | HTMLAudioElement | null {
     if (activeType === "video") return videoEl;
@@ -71,6 +82,32 @@
 
   function isCurrent(sessionId: string, sequence: number): boolean {
     return activeSessionId === sessionId && activeSequence === sequence;
+  }
+
+  function formatTime(s: number): string {
+    if (!isFinite(s) || s < 0) return "0:00";
+    const mins = Math.floor(s / 60);
+    const secs = Math.floor(s % 60);
+    return `${mins}:${secs.toString().padStart(2, "0")}`;
+  }
+
+  function loopDisplay(n: number): string {
+    if (n === 0) return "∞";
+    return String(n);
+  }
+
+  function isLooped(): boolean {
+    return loopTotal > 1 || loopTotal === 0;
+  }
+
+  function formatProgressText(): string {
+    if (loopTotal > 1) {
+      return `${tr.playback.loop} ${loopCurrent}/${loopTotal}`;
+    }
+    if (loopTotal === 0) {
+      return `${tr.playback.loop} ∞`;
+    }
+    return "";
   }
 
   function waitUntilPlayable(
@@ -128,12 +165,16 @@
         volume: number;
         playlist?: PlaylistItem[];
         currentIndex?: number;
+        currentLoop?: number;
+        totalLoops?: number;
       }>("playback:start", async ({ payload }) => {
         console.log("[MiniPlayer] playback:start event received:", payload);
         activeSessionId = payload.sessionId;
         activeSequence = payload.sequence;
         completedKey = null;
         activeType = payload.type;
+        loopCurrent = payload.currentLoop ?? 0;
+        loopTotal = payload.totalLoops ?? 0;
         if (payload.playlist) {
           playlist = payload.playlist;
           loadDurations(payload.playlist); // load async, don't await
@@ -214,6 +255,10 @@
         playlist = [];
         currentIndex = 0;
         durations = {};
+        currentTime = 0;
+        duration = 0;
+        loopCurrent = 0;
+        loopTotal = 0;
         // Clear media elements without triggering load() error
         if (videoEl) {
           videoEl.pause();
@@ -248,17 +293,18 @@
     if (e.target !== activeEl()) return;
     finishPlayback(activeSessionId ?? "", activeSequence);
   }
-  async function handlePause() {
-    console.log("[MiniPlayer] Pause button clicked");
-    await emit("playback:pause", {});
+
+  function handlePause() {
+    emit("playback:pause", {});
   }
-  async function handleResume() {
-    console.log("[MiniPlayer] Resume button clicked");
-    await emit("playback:resume", {});
+  function handleResume() {
+    emit("playback:resume", {});
   }
-  async function handleStop() {
-    console.log("[MiniPlayer] Stop button clicked");
-    await emit("playback:stop", {});
+  function handleStop() {
+    emit("playback:stop", {});
+  }
+  function handleReset() {
+    emit("playback:reset", {});
   }
 
   function handleMediaError(e: Event) {
@@ -283,6 +329,42 @@
     console.log("[MiniPlayer] Media loaded successfully:", target.src);
   }
 
+  function handleTimeUpdate() {
+    const el = activeEl();
+    if (el && el.duration && isFinite(el.duration)) {
+      currentTime = el.currentTime;
+      duration = el.duration;
+    }
+  }
+
+  function handleSeek(e: MouseEvent | KeyboardEvent) {
+    const el = activeEl();
+    if (!el || !duration || !isFinite(duration)) return;
+    // Keyboard: move by 5% per press
+    if (e instanceof KeyboardEvent) {
+      const step = duration * 0.05;
+      if (e.key === ' ') {
+        e.preventDefault();
+        el.currentTime = Math.min(duration, el.currentTime + step);
+      } else if (e.key === 'Enter') {
+        e.preventDefault();
+        el.currentTime = Math.max(0, el.currentTime - step);
+      }
+      return;
+    }
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const pct = Math.max(0, Math.min(1, x / rect.width));
+    el.currentTime = pct * duration;
+  }
+
+  function handleMediaLoadedMetadata() {
+    const el = activeEl();
+    if (el && el.duration && isFinite(el.duration)) {
+      duration = el.duration;
+    }
+  }
+
   function loopLabel(n: number): string {
     if (n === 0) return "∞";
     if (n === 1) return "";
@@ -304,6 +386,8 @@
       onended={handleEnded}
       onerror={handleMediaError}
       onloadeddata={handleMediaLoaded}
+      ontimeupdate={handleTimeUpdate}
+      onloadedmetadata={handleMediaLoadedMetadata}
       style="width:100%;height:100%;object-fit:contain;pointer-events:none;"
     ></video>
     <audio
@@ -312,11 +396,22 @@
       onended={handleEnded}
       onerror={handleMediaError}
       onloadeddata={handleMediaLoaded}
+      ontimeupdate={handleTimeUpdate}
+      onloadedmetadata={handleMediaLoadedMetadata}
     ></audio>
     <div class="video-drag-overlay" data-tauri-drag-region></div>
     {#if pb.mediaType !== "video"}
-      <div class="audio-icon"><IconMusic size={32} color="yellowgreen" /></div>
+      <div class="audio-icon"><IconMusic size={32} color="#4ade80" /></div>
     {/if}
+  </div>
+
+  <!-- Progress bar -->
+  <div class="progress-row">
+    <span class="progress-time">{formatTime(currentTime)}</span>
+    <div class="progress-bar" onclick={handleSeek} onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') handleSeek(e); }} role="slider" aria-label="Playback progress" aria-valuenow={Math.round(currentTime)} aria-valuemin={0} aria-valuemax={Math.round(duration)} tabindex={pb.status === 'idle' ? undefined : 0}>
+      <div class="progress-fill" style="width: {duration > 0 ? ((currentTime / duration) * 100).toFixed(2) : 0}%"></div>
+    </div>
+    <span class="progress-time">{duration > 0 ? formatTime(duration) : '--:--'}</span>
   </div>
 
   <!-- Controls bar -->
@@ -327,25 +422,46 @@
     </div>
     <div class="buttons">
       {#if pb.status === "playing"}
-        <button class="ctrl-btn" onclick={handlePause} title="Pause"
-          ><IconPlayerPause size={20} /></button
-        >
+        <span class="tt ctrl-btn-wrap">
+          <button class="ctrl-btn" onclick={handlePause}>
+            <IconPlayerPause size={20} />
+          </button>
+          <span class="tt__bubble">{tr.playback.pause}</span>
+        </span>
       {:else}
-        <button
-          class="ctrl-btn"
-          onclick={handleResume}
-          title="Resume"
-          disabled={pb.status === "idle"}><IconPlayerPlay size={20} /></button
-        >
+        <span class="tt ctrl-btn-wrap">
+          <button
+            class="ctrl-btn"
+            onclick={handleResume}
+            disabled={pb.status === "idle"}><IconPlayerPlay size={20} /></button
+          >
+          <span class="tt__bubble">{tr.playback.resume}</span>
+        </span>
       {/if}
-      <button
-        class="ctrl-btn danger"
-        onclick={handleStop}
-        title="Stop"
-        disabled={pb.status === "idle"}><IconPlayerStop size={20} /></button
-      >
+      <span class="tt ctrl-btn-wrap">
+        <button
+          class="ctrl-btn danger"
+          onclick={handleStop}
+          disabled={pb.status === "idle"}><IconPlayerStop size={20} /></button
+        >
+        <span class="tt__bubble">{tr.playback.stop}</span>
+      </span>
+      {#if pb.status !== "idle"}
+        <span class="tt ctrl-btn-wrap">
+          <button
+            class="ctrl-btn reset"
+            onclick={handleReset}><IconRefresh size={20} /></button
+          >
+          <span class="tt__bubble">{tr.playback.reset}</span>
+        </span>
+      {/if}
     </div>
   </div>
+
+  <!-- Loop badge -->
+  {#if pb.status !== "idle" && isLooped()}
+    <div class="loop-badge">{formatProgressText()}</div>
+  {/if}
 
   <!-- Playlist -->
   {#if playlist.length > 0}
@@ -420,6 +536,47 @@
     opacity: 1;
   }
 
+  /* Progress bar */
+  .progress-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 12px 4px;
+    flex-shrink: 0;
+    background: #12122a;
+  }
+  .progress-time {
+    font-size: 12px;
+    color: #666;
+    font-variant-numeric: tabular-nums;
+    min-width: 32px;
+    text-align: center;
+    user-select: none;
+    flex-shrink: 0;
+  }
+  .progress-bar {
+    flex: 1;
+    height: 4px;
+    background: #2a2a4a;
+    border-radius: 100px;
+    overflow: hidden;
+    cursor: default;
+    transition: cursor 0.15s ease;
+    user-select: none;
+  }
+  .progress-bar:hover {
+    cursor: pointer;
+  }
+  .progress-bar:active {
+    cursor: grabbing;
+  }
+  .progress-fill {
+    height: 100%;
+    background: #4ade80;
+    border-radius: 100px;
+    transition: width 0.1s linear;
+  }
+
   .controls {
     display: flex;
     align-items: center;
@@ -428,7 +585,7 @@
     gap: 10px;
     flex-shrink: 0;
     background: #12122a;
-    border-bottom: 1px solid #2a2a4a;
+    border-top: 1px solid #2a2a4a;
   }
   .info {
     display: flex;
@@ -457,8 +614,12 @@
 
   .buttons {
     display: flex;
-    gap: 6px;
+    align-items: center;
+    gap: 4px;
     flex-shrink: 0;
+  }
+  .ctrl-btn-wrap {
+    display: inline-flex;
   }
   .ctrl-btn {
     background: rgba(255, 255, 255, 0.1);
@@ -467,13 +628,18 @@
     border-radius: 6px;
     padding: 6px 10px;
     cursor: pointer;
-    transition: 0.15s;
+    transition: background 0.15s ease, transform 0.08s ease;
     display: flex;
     align-items: center;
     justify-content: center;
+    line-height: 1;
   }
   .ctrl-btn:hover:not(:disabled) {
     background: rgba(255, 255, 255, 0.2);
+  }
+  .ctrl-btn:active:not(:disabled) {
+    transform: scale(0.95);
+    background: rgba(255, 255, 255, 0.25);
   }
   .ctrl-btn:disabled {
     opacity: 0.35;
@@ -482,6 +648,55 @@
   .ctrl-btn.danger:hover:not(:disabled) {
     background: rgba(239, 68, 68, 0.3);
     color: #fca5a5;
+  }
+  .ctrl-btn.reset:hover:not(:disabled) {
+    background: rgba(234, 179, 8, 0.2);
+    color: #fde68a;
+  }
+
+  /* Tooltip */
+  .tt {
+    position: relative;
+  }
+
+  .tt__bubble {
+    position: absolute;
+    left: 50%;
+    bottom: calc(100% + 6px);
+    transform: translateX(-50%);
+    padding: 5px 8px;
+    border-radius: 5px;
+    background: #111;
+    color: #fff;
+    font-size: 11px;
+    white-space: nowrap;
+    z-index: 999;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.12s ease, transform 0.12s ease;
+  }
+
+  .tt:hover .tt__bubble,
+  .tt:focus-visible .tt__bubble {
+    opacity: 1;
+    transform: translateX(-50%) translateY(-2px);
+  }
+
+  /* Loop badge */
+  .loop-badge {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 4px 12px;
+    background: #12122a;
+    border-top: 1px solid #2a2a4a;
+    font-size: 11px;
+    color: #4ade80;
+    letter-spacing: 0.04em;
+    font-weight: 600;
+    text-transform: uppercase;
+    flex-shrink: 0;
+    user-select: none;
   }
 
   /* Playlist */

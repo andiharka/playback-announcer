@@ -47,7 +47,7 @@ export interface Translations {
   tts: { title: string; name: string; namePlaceholder: string; generateAudio: string; credits: string; creditsRemaining: string; connectionOnline: string; connectionOffline: string; text: string; textPlaceholder: string; charLimit: string; voice: string; voicePlaceholder: string; model: string; modelPlaceholder: string; language: string; speed: string; speedHint: string; stability: string; stabilityHint: string; similarity: string; similarityHint: string; generating: string; completed: string; failed: string; noHistory: string; deleteConfirm: string; downloadSuccess: string; downloadFailed: string; offline: string; sync: string; syncing: string };
   days: DayNames;
   unsaved: { title: string; message: string; save: string; discard: string; cancel: string };
-  playback: { nowPlaying: string; paused: string; pause: string; resume: string; stop: string };
+  playback: { nowPlaying: string; paused: string; pause: string; resume: string; stop: string; reset: string; loop: string };
   status: { active: string; paused: string };
 }
 
@@ -209,6 +209,8 @@ export const id: Translations = {
     pause: 'Jeda',
     resume: 'Lanjutkan',
     stop: 'Hentikan',
+    reset: 'Mulai Ulang',
+    loop: 'Putar Ulang',
   },
   status: {
     active: 'Aktif',

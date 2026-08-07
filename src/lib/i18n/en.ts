@@ -158,6 +158,8 @@ export const en: Translations = {
     pause: 'Pause',
     resume: 'Resume',
     stop: 'Stop',
+    reset: 'Reset',
+    loop: 'Loop',
   },
   status: {
     active: 'Active',
