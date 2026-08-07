@@ -134,6 +134,7 @@
           queueIndex = 0;
           scheduleLoopRemaining = 0;
           scheduleLoopCountInit = 0;
+          activeScheduleName = "";
           invoke("close_mini_player").catch(() => {});
           scheduleIdForReset = null;
           if (destroyed) removePlaybackListeners();
@@ -205,6 +206,7 @@
   let currentSessionId: string | null = null;
   let currentSequence = 0;
   let scheduleIdForReset: string | null = null;
+  let activeScheduleName = ""; // display name sent to MiniPlayer (name or time fallback)
   let newScheduleId = $state<string | null>(null);
 
   async function waitForMiniPlayer(sessionId: string): Promise<boolean> {
@@ -275,6 +277,7 @@
     isPlayingSchedule = true;
     advancing = false;
     scheduleIdForReset = scheduleId;
+    activeScheduleName = schedule.name?.trim() || schedule.time || "";
 
     setPlaybackState({
       status: "playing",
@@ -337,6 +340,7 @@
       currentIndex: index,
       currentLoop: currentLoopNum,
       totalLoops: totalLoopsDisplay,
+      scheduleName: activeScheduleName,
     });
   }
 

@@ -51,9 +51,13 @@
   let loopCurrent = $state(0);
   let loopTotal = $state(0);
 
+  // Schedule name shown as the title (from scheduler, fallback to time)
+  let scheduleTitle = $state("");
+
   const pb = $derived(playbackStore.state);
   const fileName = $derived(pb.mediaPath ? getFileName(pb.mediaPath) : "");
   const tr = $derived(t());
+  const titleText = $derived(scheduleTitle || fileName || "—");
 
   function activeEl(): HTMLVideoElement | HTMLAudioElement | null {
     if (activeType === "video") return videoEl;
@@ -167,6 +171,7 @@
         currentIndex?: number;
         currentLoop?: number;
         totalLoops?: number;
+        scheduleName?: string;
       }>("playback:start", async ({ payload }) => {
         console.log("[MiniPlayer] playback:start event received:", payload);
         activeSessionId = payload.sessionId;
@@ -175,6 +180,7 @@
         activeType = payload.type;
         loopCurrent = payload.currentLoop ?? 0;
         loopTotal = payload.totalLoops ?? 0;
+        scheduleTitle = payload.scheduleName ?? "";
         if (payload.playlist) {
           playlist = payload.playlist;
           loadDurations(payload.playlist); // load async, don't await
@@ -259,6 +265,7 @@
         duration = 0;
         loopCurrent = 0;
         loopTotal = 0;
+        scheduleTitle = "";
         // Clear media elements without triggering load() error
         if (videoEl) {
           videoEl.pause();
@@ -418,7 +425,12 @@
   <div class="controls" data-tauri-drag-region>
     <div class="info" data-tauri-drag-region title={pb.mediaPath ?? ""}>
       <span class="status-dot" class:playing={pb.status === "playing"}></span>
-      <span class="filename">{fileName || "—"}</span>
+      <div class="title-block">
+        <span class="schedule-title">{titleText}</span>
+        {#if scheduleTitle && fileName}
+          <span class="media-name">{fileName}</span>
+        {/if}
+      </div>
     </div>
     <div class="buttons">
       {#if pb.status === "playing"}
@@ -594,6 +606,29 @@
     overflow: hidden;
     flex: 1;
   }
+  .title-block {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    min-width: 0;
+    flex: 1;
+    overflow: hidden;
+  }
+  .schedule-title {
+    font-size: 15px;
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    color: #e0e0e0;
+  }
+  .media-name {
+    font-size: 11px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    color: #888;
+  }
   .status-dot {
     width: 7px;
     height: 7px;
@@ -604,12 +639,6 @@
   }
   .status-dot.playing {
     background: #4ade80;
-  }
-  .filename {
-    font-size: 16px;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
   }
 
   .buttons {
